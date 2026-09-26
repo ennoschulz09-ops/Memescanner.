@@ -181,6 +181,13 @@
   .actbtn.chart:active{background:rgba(34,211,238,.15);}
   .actbtn:disabled{opacity:.4;}
 
+  .resetcard{border-color:rgba(255,210,63,.25);background:linear-gradient(160deg, rgba(255,210,63,.06), transparent 55%), rgba(14,15,24,.65);}
+  .actbtn.reset{border-color:var(--yellow);color:var(--yellow);font-size:12.5px;padding:12px 8px;}
+  .actbtn.reset:active{background:rgba(255,210,63,.15);}
+  .actbtn.reset.confirm{border-color:var(--red);color:var(--red);background:rgba(255,47,109,.12);box-shadow:0 0 18px rgba(255,47,109,.35);animation:pulse 1s infinite;}
+  .resetmeta{font-size:11px;color:var(--muted);text-align:center;margin-top:9px;}
+  .resetmeta b{color:var(--p3);}
+
   .filterbar{display:flex;align-items:center;gap:10px;}
   .filterbar input[type=range]{flex:1;}
   .filterbar .fval{font-weight:900;color:var(--green);min-width:26px;text-align:right;}
@@ -357,6 +364,12 @@
 
   <!-- TRADING (Paper-Trading + Stats zusammen) -->
   <section id="trading" style="display:none;">
+    <div class="card resetcard">
+      <h3>🔄 Neue Runde</h3>
+      <div class="sub2" style="margin-bottom:10px;">Setzt Guthaben, offene Positionen, Trade-Historie und Signale zurück auf den Start (2.00 SOL). Die von der KI gelernten Werte (Schwelle, Stop-Loss, Take-Profit, Timeout, Trailing-Stop) und die Anpassungs-Historie im KI-Tab bleiben erhalten.</div>
+      <button class="actbtn reset" id="resetBtn" onclick="handleResetClick()" style="width:100%;">Konto zurücksetzen (2 SOL)</button>
+      <div class="resetmeta" id="resetMeta"></div>
+    </div>
     <div class="card">
       <h3>Positionsgröße pro Trade</h3>
       <div class="segbtns" id="sizeButtons">
@@ -423,7 +436,7 @@
 
     <div class="opt-card">
       <h3 style="margin-bottom:8px;">🤖 Selbstoptimierung — lernt aus eigenen Trades</h3>
-      <div class="sub2" style="margin-bottom:8px;">Analysiert automatisch abgeschlossene Bot-Trades und passt Schwelle/Stop-Loss/Timeout an — einfache regelbasierte Selbstjustierung, kein neuronales Netz.</div>
+      <div class="sub2" style="margin-bottom:8px;">Analysiert automatisch abgeschlossene Bot-Trades und passt Schwelle/Stop-Loss/Timeout an — einfache regelbasierte Selbstjustierung, kein neuronales Netz. Bleibt auch über einen Konto-Reset hinweg erhalten.</div>
       <div id="optLog"><div class="opt-entry">Noch keine Anpassungen — braucht ein paar abgeschlossene Trades.</div></div>
     </div>
 
@@ -470,11 +483,12 @@ let state = load() || {
   partialTpPct: 8, maxPositions: 5, lossStreak: 0, cooldownUntil: 0, blacklist: {}, feeSlippagePct: 2,
   scoreBandStats: {}
 };
-// Risiko-Parameter fix nachgezogen (nicht user-einstellbar) — vorherige Werte ließen Gewinne zu lange laufen,
-// bis sie beim Timeout wieder verpufft waren. Jetzt enger + mit Trailing-Stop, siehe tickPositions().
-state.stopLossPct = -12;
-state.takeProfitPct = 15;
-state.timeoutMin = 10;
+// Startwerte nur setzen, falls noch kein gespeicherter Stand existiert. Diese drei Werte werden von
+// autoImprove() laufend angepasst (Lerneffekt) — sie dürfen beim Laden NICHT mehr überschrieben werden,
+// sonst geht die Selbstoptimierung bei jedem Neuladen/Reset wieder verloren.
+if(state.stopLossPct===undefined) state.stopLossPct = -12;
+if(state.takeProfitPct===undefined) state.takeProfitPct = 15;
+if(state.timeoutMin===undefined) state.timeoutMin = 10;
 if(state.minLiquidity===undefined) state.minLiquidity = 3000;
 if(state.trailArmPct===undefined) state.trailArmPct = 9;
 if(state.trailGiveBackPct===undefined) state.trailGiveBackPct = 5;
@@ -485,6 +499,8 @@ if(state.cooldownUntil===undefined) state.cooldownUntil = 0;
 if(state.blacklist===undefined) state.blacklist = {};
 if(state.feeSlippagePct===undefined) state.feeSlippagePct = 2;
 if(state.scoreBandStats===undefined) state.scoreBandStats = {};
+if(state.resets===undefined) state.resets = 0;
+if(state.lifetimeTrades===undefined) state.lifetimeTrades = 0;
 if(state.improvements===undefined) state.improvements=[];
 if(state.scoreFilter===undefined) state.scoreFilter=50;
 if(state.soundOn===undefined) state.soundOn=false;
@@ -1104,6 +1120,54 @@ function setBotRunning(on){
   save(); render();
 }
 document.getElementById('botSwitch').addEventListener('click', ()=>setBotRunning(!state.botRunning));
+
+let resetConfirmTimer=null;
+function handleResetClick(){
+  const btn=document.getElementById('resetBtn');
+  if(btn.dataset.confirm==='1'){
+    clearTimeout(resetConfirmTimer);
+    resetAccount();
+    btn.dataset.confirm='0';
+    btn.classList.remove('confirm');
+    btn.textContent='Konto zurücksetzen (2 SOL)';
+    return;
+  }
+  btn.dataset.confirm='1';
+  btn.classList.add('confirm');
+  btn.textContent='⚠️ Wirklich? Nochmal tippen zum Bestätigen';
+  resetConfirmTimer=setTimeout(()=>{
+    btn.dataset.confirm='0';
+    btn.classList.remove('confirm');
+    btn.textContent='Konto zurücksetzen (2 SOL)';
+  }, 4000);
+}
+function resetAccount(){
+  state.lifetimeTrades = (state.lifetimeTrades||0) + state.history.length;
+  state.resets = (state.resets||0) + 1;
+  state.balance = 2.0;
+  state.startBalance = 2.0;
+  state.positions = [];
+  state.history = [];
+  state.signals = [];
+  state.log = [];
+  state.totalScanned = 0;
+  state.priceHistory = {};
+  state.equityHistory = [{t:Date.now(), b:2.0}];
+  state.lossStreak = 0;
+  state.cooldownUntil = 0;
+  state.blacklist = {};
+  priceMap = {}; mcapMap = {}; confirmMap = {};
+  // threshold, stopLossPct, takeProfitPct, timeoutMin, trailArmPct, trailGiveBackPct, partialTpPct,
+  // maxPositions, minLiquidity, feeSlippagePct, improvements und scoreBandStats bleiben bewusst erhalten —
+  // das ist der Lerneffekt der Selbstoptimierung, den ein Reset nicht löschen soll.
+  state.improvements.unshift({time:new Date().toLocaleTimeString(),
+    msg:`Runde ${state.resets} gestartet mit 2.00 SOL — gelernte Einstellungen bleiben: Schwelle ${state.threshold}, Stop-Loss ${state.stopLossPct}%, Take-Profit ${state.takeProfitPct}%, Timeout ${state.timeoutMin} Min.`});
+  state.improvements = state.improvements.slice(0,20);
+  logMsg(`🔄 Konto zurückgesetzt — Runde ${state.resets} startet mit 2.00 SOL, KI-Lernstand bleibt erhalten`);
+  document.getElementById('thresholdSlider').value = state.threshold;
+  save(); render();
+  showToast('Neue Runde — 2.00 SOL', 'win');
+}
 document.getElementById('thresholdSlider').addEventListener('input', e=>{
   state.threshold=+e.target.value;
   document.getElementById('thresholdVal').textContent=state.threshold;
@@ -1240,6 +1304,13 @@ function render(){
         </div>
       </div>`;
     }).join('') : '<div class="empty">Kein Coin über Score '+state.scoreFilter+' — Filter niedriger stellen oder auf nächsten Scan warten.</div>';
+  }
+  const rm = document.getElementById('resetMeta');
+  if(rm){
+    const totalTrades = (state.lifetimeTrades||0) + state.history.length;
+    rm.innerHTML = state.resets
+      ? `Runde <b>${state.resets+1}</b> · KI hat insgesamt <b>${totalTrades}</b> Trades über <b>${state.resets}</b> Reset(s) ausgewertet`
+      : `Erste Runde · <b>${state.history.length}</b> Trades bisher ausgewertet`;
   }
   renderEquityChart();
   renderDailyBarChart();
