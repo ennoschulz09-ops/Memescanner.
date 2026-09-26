@@ -255,6 +255,11 @@
 
   /* ---- Theme-Toggle (Light Mode) ---- */
   .themepill{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:10px 12px;font-size:14px;color:var(--muted);cursor:pointer;display:flex;align-items:center;justify-content:center;}
+
+  .bandrow{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;padding:8px 0;border-bottom:1px solid var(--border);font-size:12px;align-items:center;}
+  .bandrow:last-child{border-bottom:none;}
+  .bandrow.head{color:var(--muted);font-weight:800;text-transform:uppercase;font-size:10px;letter-spacing:.04em;}
+  .bandrow b{font-size:13px;}
   :root[data-theme="light"]{
     --bg:#f3f4fa; --panel:#ffffff; --panel2:#f0f1f8; --border:#dcdfec;
     --text:#12131c; --muted:#6b7086;
@@ -370,7 +375,7 @@
       <div class="mini"><div class="l">Ø / Trade</div><div class="v" id="avgPnl">0.00</div></div>
     </div>
     <div class="card info">
-      Kauf bei jedem Signal mit Score ≥ <b id="thresholdLabel2">70</b> (Liquidität ≥ $<span id="minLiqLabel">3000</span>), Positionsgröße wie oben gewählt. Verkauf simuliert bei +<span id="tpLabel">60</span>% Gewinn, <span id="slLabel">-20</span>% Verlust, Trailing-Stop (sichert Gewinn, wenn er vom Höchststand wieder abfällt) oder nach <span id="toLabel">15</span> Min · Werte werden vom Bot selbst nachjustiert (siehe KI-Tab) · reine Simulation, kein echtes Geld.
+      Kauf nur, wenn Score ≥ <b id="thresholdLabel2">70</b> <b>zwei Scans in Folge</b> bestätigt wird (Liquidität ≥ $<span id="minLiqLabel">3000</span>), max. <b id="maxPosLabel">5</b> offene Positionen gleichzeitig, Positionsgröße skaliert mit Score-Stärke. Teilverkauf (halbe Position) bei +<span id="partialTpLabel">8</span>%, Rest läuft mit Trailing-Stop weiter. Verkauf spätestens bei +<span id="tpLabel">60</span>% Gewinn, <span id="slLabel">-20</span>% Verlust oder nach <span id="toLabel">15</span> Min. Nach 3 Verlusten in Folge 5 Min Kaufpause, verkaufte Coins 10 Min gesperrt. <span id="feeLabel">2</span>% Gebühren/Slippage je Trade eingerechnet · Werte werden vom Bot selbst nachjustiert (siehe KI-Tab) · reine Simulation, kein echtes Geld.
     </div>
     <div class="card">
       <h3>Schwelle anpassen</h3>
@@ -422,6 +427,12 @@
       <div id="optLog"><div class="opt-entry">Noch keine Anpassungen — braucht ein paar abgeschlossene Trades.</div></div>
     </div>
 
+    <div class="opt-card">
+      <h3 style="margin-bottom:8px;">📊 Performance nach Score-Band</h3>
+      <div class="sub2" style="margin-bottom:8px;">Zeigt, ob hohe Scores wirklich besser performen — Grundlage, um die Score-Formel künftig weiter zu kalibrieren.</div>
+      <div id="scoreBandTable"><div class="empty">Noch keine Daten — braucht abgeschlossene Trades.</div></div>
+    </div>
+
     <div class="chatbox" id="chatbox"></div>
     <div class="thumbrow" id="pendingImgRow" style="display:none;"></div>
 
@@ -455,7 +466,9 @@ let state = load() || {
   balance: 2.0, startBalance: 2.0, botRunning: false, threshold: 70, tradeSize: 0.5,
   positions: [], history: [], signals: [], log: [], totalScanned: 0,
   stopLossPct: -12, takeProfitPct: 15, timeoutMin: 10, improvements: [], scoreFilter: 50, soundOn: false,
-  priceHistory: {}, equityHistory: [], theme: 'dark', minLiquidity: 3000, trailArmPct: 9, trailGiveBackPct: 5
+  priceHistory: {}, equityHistory: [], theme: 'dark', minLiquidity: 3000, trailArmPct: 9, trailGiveBackPct: 5,
+  partialTpPct: 8, maxPositions: 5, lossStreak: 0, cooldownUntil: 0, blacklist: {}, feeSlippagePct: 2,
+  scoreBandStats: {}
 };
 // Risiko-Parameter fix nachgezogen (nicht user-einstellbar) — vorherige Werte ließen Gewinne zu lange laufen,
 // bis sie beim Timeout wieder verpufft waren. Jetzt enger + mit Trailing-Stop, siehe tickPositions().
@@ -465,6 +478,13 @@ state.timeoutMin = 10;
 if(state.minLiquidity===undefined) state.minLiquidity = 3000;
 if(state.trailArmPct===undefined) state.trailArmPct = 9;
 if(state.trailGiveBackPct===undefined) state.trailGiveBackPct = 5;
+if(state.partialTpPct===undefined) state.partialTpPct = 8;
+if(state.maxPositions===undefined) state.maxPositions = 5;
+if(state.lossStreak===undefined) state.lossStreak = 0;
+if(state.cooldownUntil===undefined) state.cooldownUntil = 0;
+if(state.blacklist===undefined) state.blacklist = {};
+if(state.feeSlippagePct===undefined) state.feeSlippagePct = 2;
+if(state.scoreBandStats===undefined) state.scoreBandStats = {};
 if(state.improvements===undefined) state.improvements=[];
 if(state.scoreFilter===undefined) state.scoreFilter=50;
 if(state.soundOn===undefined) state.soundOn=false;
@@ -475,6 +495,7 @@ document.documentElement.setAttribute('data-theme', state.theme);
 document.addEventListener('DOMContentLoaded', ()=>{ const tb=document.getElementById('themeToggle'); if(tb) tb.textContent = state.theme==='light' ? '☀️' : '🌙'; });
 let priceMap = {}; // address -> latest real price from most recent scan (not persisted)
 let mcapMap = {}; // address -> latest real market cap from most recent scan (not persisted)
+let confirmMap = {}; // address -> Anzahl aufeinanderfolgender Scans über der Score-Schwelle (nicht persistiert)
 function save(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
 function load(){ try{ const r=localStorage.getItem(STORAGE_KEY); return r?JSON.parse(r):null; }catch(e){ return null; } }
 function logMsg(m){ state.log.unshift(new Date().toLocaleTimeString()+" — "+m); state.log=state.log.slice(0,40); }
@@ -665,6 +686,27 @@ function renderEquityChart(){
 }
 
 // ---- Tages-Bar-Chart (letzte 7 Tage) ----
+// ---- Score-Band-Auswertung ----
+function renderScoreBandTable(){
+  const el = document.getElementById('scoreBandTable');
+  if(!el) return;
+  const bands = Object.keys(state.scoreBandStats).map(Number).sort((a,b)=>a-b);
+  if(!bands.length){ el.innerHTML = '<div class="empty">Noch keine Daten — braucht abgeschlossene Trades.</div>'; return; }
+  let html = `<div class="bandrow head"><div>Score</div><div>Trades</div><div>Trefferquote</div><div>Ø PnL</div></div>`;
+  bands.forEach(band=>{
+    const b = state.scoreBandStats[band];
+    const wr = Math.round((b.wins/b.trades)*100);
+    const avgPnl = b.pnlSum/b.trades;
+    html += `<div class="bandrow">
+      <b>${band}${band>=90?'+':'-'+(band+9)}</b>
+      <div>${b.trades}</div>
+      <div class="${wr>=50?'pos':'neg'}">${wr}%</div>
+      <div class="${avgPnl>=0?'pos':'neg'}">${avgPnl>=0?'+':''}${avgPnl.toFixed(3)}</div>
+    </div>`;
+  });
+  el.innerHTML = html;
+}
+
 function renderDailyBarChart(){
   const el = document.getElementById('dailyBarChart');
   if(!el) return;
@@ -823,10 +865,17 @@ async function fetchTokenChunk(addrs){
 }
 async function fetchRealCoins(){
   try{
-    const boostRes = await fetch('https://api.dexscreener.com/token-boosts/latest/v1');
-    if(!boostRes.ok) throw new Error('boost fetch failed');
-    const boosts = await boostRes.json();
-    const solAddrs = [...new Set(boosts.filter(b=>b.chainId==='solana').map(b=>b.tokenAddress))].slice(0,50);
+    // Latest-Boosts (frisch gepusht) + Top-Boosts (etabliertere Coins mit anhaltendem Boost-Invest)
+    // gemischt, statt nur die Latest-Liste — etwas breiterer, weniger reiner "Pump-and-dump"-Pool.
+    const [latestRes, topRes] = await Promise.all([
+      fetch('https://api.dexscreener.com/token-boosts/latest/v1'),
+      fetch('https://api.dexscreener.com/token-boosts/top/v1')
+    ]);
+    if(!latestRes.ok && !topRes.ok) throw new Error('boost fetch failed');
+    const latest = latestRes.ok ? await latestRes.json() : [];
+    const top = topRes.ok ? await topRes.json() : [];
+    const merged = [...latest, ...top];
+    const solAddrs = [...new Set(merged.filter(b=>b.chainId==='solana').map(b=>b.tokenAddress))].slice(0,50);
     if(!solAddrs.length) throw new Error('no sol addresses');
     const chunks = [];
     for(let i=0;i<solAddrs.length;i+=30) chunks.push(solAddrs.slice(i,i+30));
@@ -874,11 +923,27 @@ async function runScan(){
   coins.forEach(c=>{ c.score=scoreCoin(c); c.time=new Date().toLocaleTimeString(); if(c.price) priceMap[c.address]=c.price; if(c.mcap) mcapMap[c.address]=c.mcap; pushPriceHistory(c.address, c.price||c.score); });
   state.totalScanned += coins.length;
   coins.sort((a,b)=>b.score-a.score);
+
+  // ---- Signal-Bestätigung: Score muss 2 Scans in Folge über der Schwelle bleiben, bevor gekauft wird ----
+  const seenNow = new Set(coins.map(c=>c.address));
+  Object.keys(confirmMap).forEach(a=>{ if(!seenNow.has(a)) delete confirmMap[a]; });
+  coins.forEach(c=>{
+    if(c.score>=state.threshold) confirmMap[c.address] = (confirmMap[c.address]||0)+1;
+    else confirmMap[c.address] = 0;
+  });
+
+  const inCooldown = Date.now() < state.cooldownUntil;
+
   coins.forEach(c=>{
     const sig={symbol:c.symbol, score:c.score, time:c.time, address:c.address, pairAddress:c.pairAddress, price:c.price,
       liquidity:Math.round(c.liquidity), mcap:Math.round(c.mcap), action: c.score>=state.threshold?"KAUF":"ignoriert"};
     state.signals.unshift(sig);
-    if(c.score>=state.threshold && c.liquidity>=state.minLiquidity && state.botRunning) openPosition(c);
+    const blacklisted = state.blacklist[c.address] && Date.now() < state.blacklist[c.address];
+    const confirmed = (confirmMap[c.address]||0) >= 2;
+    const roomLeft = state.positions.length < state.maxPositions;
+    if(c.score>=state.threshold && c.liquidity>=state.minLiquidity && confirmed && roomLeft && !inCooldown && !blacklisted && state.botRunning){
+      openPosition(c);
+    }
   });
   // je Coin nur das neueste Signal behalten (statt jeden Scan zu stapeln), sonst dopplen sich Einträge bei "alle Coins" schnell
   const dedup=[]; const seenAddr=new Set();
@@ -889,12 +954,19 @@ async function runScan(){
   logMsg(`Scan: ${coins.length} Coins geprüft (${badge.textContent})`);
   save(); render();
 }
+function positionSizeFor(score){
+  const t=state.threshold;
+  const range = Math.max(1, 100-t);
+  const frac = Math.min(1, Math.max(0,(score-t)/range));
+  const mult = 0.7 + frac*0.8; // 0.7x bei Score genau an der Schwelle, bis 1.5x bei Score 100
+  return +(state.tradeSize*mult).toFixed(3);
+}
 function openPosition(c, manual){
   if(state.positions.find(p=>p.symbol===c.symbol)){ if(manual) logMsg(`${c.symbol}: Position bereits offen`); return; }
-  const size = state.tradeSize;
+  const size = manual ? state.tradeSize : positionSizeFor(c.score);
   if(state.balance < size){ logMsg(`Zu wenig Balance für ${c.symbol}`); return; }
   state.balance -= size;
-  state.positions.push({symbol:c.symbol, address:c.address, pairAddress:c.pairAddress, entryPrice:c.price||0, entryMcap:c.mcap||mcapMap[c.address]||0, size, score:c.score, pnlPct:0, openedAt:Date.now(), manual: !!manual});
+  state.positions.push({symbol:c.symbol, address:c.address, pairAddress:c.pairAddress, entryPrice:c.price||0, entryMcap:c.mcap||mcapMap[c.address]||0, size, origSize:size, score:c.score, pnlPct:0, peakPct:0, partialTaken:false, openedAt:Date.now(), manual: !!manual});
   logMsg(`${manual?'Manuell gekauft':'Gekauft'}: ${c.symbol} für ${size} SOL (Score ${c.score})`);
   playBuySound();
   recordEquity();
@@ -903,17 +975,42 @@ function closePosition(p, reasonOverride){
   const heldMin=(Date.now()-p.openedAt)/60000;
   const tp=p.pnlPct>=state.takeProfitPct, sl=p.pnlPct<=state.stopLossPct;
   const reason = reasonOverride || (tp?"Take-Profit":sl?"Stop-Loss":"Timeout");
-  const pnl=+(p.size*(p.pnlPct/100)).toFixed(4);
+  // Realismus-Abzug: Gebühren + Slippage bei so geringer Liquidität sind in echt nie 0.
+  const effPnlPct = (p.pnlPct||0) - state.feeSlippagePct;
+  const pnl=+(p.size*(effPnlPct/100)).toFixed(4);
   const exitPrice = priceMap[p.address] || (p.entryPrice*(1+(p.pnlPct||0)/100));
   const exitMcap = mcapMap[p.address] || (p.entryMcap ? p.entryMcap*(1+(p.pnlPct||0)/100) : 0);
   state.balance += p.size+pnl;
-  state.history.unshift({symbol:p.symbol, size:p.size, pnl, pnlPct:(p.pnlPct||0).toFixed(1),
-    entryPrice:p.entryPrice||0, exitPrice, entryMcap:p.entryMcap||0, exitMcap,
+  state.history.unshift({symbol:p.symbol, size:p.size, pnl, pnlPct:effPnlPct.toFixed(1),
+    entryPrice:p.entryPrice||0, exitPrice, entryMcap:p.entryMcap||0, exitMcap, score:p.score,
     reason, closedAt:new Date().toLocaleTimeString(), day:new Date().toDateString()});
   logMsg(`Verkauft: ${p.symbol} (${pnl>=0?'+':''}${pnl} SOL, ${reason})`);
-  celebrateTrade(p.symbol, pnl, (p.pnlPct||0).toFixed(1));
+  celebrateTrade(p.symbol, pnl, effPnlPct.toFixed(1));
   recordEquity();
+  trackScoreBand(p.score, pnl);
+
+  // ---- Blacklist + Verlustserie-Cooldown ----
+  if(pnl<=0){
+    state.blacklist[p.address] = Date.now() + 10*60000; // 10 Min keine erneute Position in diesem Coin
+    state.lossStreak = (state.lossStreak||0)+1;
+    if(state.lossStreak>=3){
+      state.cooldownUntil = Date.now() + 5*60000; // 5 Min Kaufpause nach 3 Verlusten in Folge
+      logMsg(`🧊 3 Verluste in Folge → Bot pausiert Käufe für 5 Minuten`);
+      state.lossStreak = 0;
+    }
+  } else {
+    state.lossStreak = 0;
+  }
+  // Blacklist-Einträge älter als 30 Min aufräumen, damit das Objekt nicht endlos wächst
+  Object.keys(state.blacklist).forEach(a=>{ if(Date.now() - state.blacklist[a] > 20*60000) delete state.blacklist[a]; });
+
   if(state.history.length && state.history.length % 5 === 0) autoImprove();
+}
+function trackScoreBand(score, pnl){
+  const band = Math.min(90, Math.floor(score/10)*10); // 50,60,...,90+
+  if(!state.scoreBandStats[band]) state.scoreBandStats[band] = {trades:0, wins:0, pnlSum:0};
+  const b = state.scoreBandStats[band];
+  b.trades++; if(pnl>0) b.wins++; b.pnlSum += pnl;
 }
 function tickPositions(){
   const stillOpen=[];
@@ -929,6 +1026,23 @@ function tickPositions(){
       p.pnlPct=(p.pnlPct||0)+drift*10;
     }
     p.peakPct = Math.max(p.peakPct ?? p.pnlPct, p.pnlPct);
+
+    // ---- Teilverkauf: bei erstem Kursziel die Hälfte sichern, Rest mit Trailing-Stop weiterlaufen lassen ----
+    if(!p.partialTaken && p.pnlPct >= state.partialTpPct && p.size > 0.01){
+      const sellSize = +(p.size/2).toFixed(4);
+      const effPct = p.pnlPct - state.feeSlippagePct;
+      const pnl = +(sellSize*(effPct/100)).toFixed(4);
+      state.balance += sellSize + pnl;
+      p.size = +(p.size - sellSize).toFixed(4);
+      p.origSize = p.origSize || (p.size+sellSize);
+      p.partialTaken = true;
+      state.history.unshift({symbol:p.symbol, size:sellSize, pnl, pnlPct:effPct.toFixed(1),
+        entryPrice:p.entryPrice||0, exitPrice: priceMap[p.address]||p.entryPrice, entryMcap:p.entryMcap||0, exitMcap: mcapMap[p.address]||p.entryMcap||0,
+        score:p.score, reason:'Teilverkauf', closedAt:new Date().toLocaleTimeString(), day:new Date().toDateString()});
+      logMsg(`Teilverkauf: ${p.symbol} — Hälfte bei +${p.pnlPct.toFixed(1)}% gesichert (${pnl>=0?'+':''}${pnl} SOL), Rest läuft weiter`);
+      recordEquity();
+    }
+
     const tp=p.pnlPct>=state.takeProfitPct;
     const sl=p.pnlPct<=state.stopLossPct;
     const to=heldMin>state.timeoutMin;
@@ -1030,6 +1144,9 @@ function render(){
   document.getElementById('scoreFilterVal2').textContent = state.scoreFilter;
   document.getElementById('tpLabel').textContent = state.takeProfitPct;
   document.getElementById('minLiqLabel').textContent = formatK(state.minLiquidity);
+  document.getElementById('maxPosLabel').textContent = state.maxPositions;
+  document.getElementById('partialTpLabel').textContent = state.partialTpPct;
+  document.getElementById('feeLabel').textContent = state.feeSlippagePct;
   document.getElementById('slLabel').textContent = state.stopLossPct;
   document.getElementById('toLabel').textContent = state.timeoutMin;
   document.querySelectorAll('.segbtn').forEach(b=>b.classList.toggle('active', parseFloat(b.dataset.size)===state.tradeSize));
@@ -1074,7 +1191,7 @@ function render(){
       <div style="display:flex;justify-content:space-between;align-items:center;width:100%;">
         <div class="rowhead">
           ${avatarHTML(p.symbol)}
-          <div><div class="coin">${p.symbol}<span class="tag">SOL</span></div><div class="sub2">${p.size} SOL · Score ${p.score}${p.manual?' · manuell':''}</div><div class="sub2">Kauf ${formatPrice(p.entryPrice)} · MC ${formatK(p.entryMcap)} → jetzt MC ${formatK(mcapMap[p.address]||p.entryMcap)}</div><div class="heldtime${nearTimeout?' warn':''}">${timeAgo(p.openedAt)}${nearTimeout?' · bald Timeout':''}</div></div>
+          <div><div class="coin">${p.symbol}<span class="tag">SOL</span></div><div class="sub2">${p.size} SOL · Score ${p.score}${p.manual?' · manuell':''}${p.partialTaken?' · Hälfte gesichert ✓':''}</div><div class="sub2">Kauf ${formatPrice(p.entryPrice)} · MC ${formatK(p.entryMcap)} → jetzt MC ${formatK(mcapMap[p.address]||p.entryMcap)}</div><div class="heldtime${nearTimeout?' warn':''}">${timeAgo(p.openedAt)}${nearTimeout?' · bald Timeout':''}</div></div>
         </div>
         <div class="${(p.pnlPct||0)>=0?'pos':'neg'}">${(p.pnlPct||0)>=0?'+':''}${(p.pnlPct||0).toFixed(1)}%</div>
       </div>
@@ -1126,6 +1243,7 @@ function render(){
   }
   renderEquityChart();
   renderDailyBarChart();
+  renderScoreBandTable();
 
   const optEl = document.getElementById('optLog');
   if(optEl){
