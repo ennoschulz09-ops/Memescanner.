@@ -179,6 +179,10 @@
   .actbtn.sell:active{background:rgba(255,47,109,.15);}
   .actbtn.chart{border-color:var(--p3);color:var(--p3);}
   .actbtn.chart:active{background:rgba(34,211,238,.15);}
+  .actbtn.social{border-color:var(--p2);color:var(--p2);}
+  .actbtn.social:active{background:rgba(236,72,153,.15);}
+  .actbtn.rug{border-color:var(--yellow);color:var(--yellow);}
+  .actbtn.rug:active{background:rgba(255,210,63,.15);}
   .actbtn:disabled{opacity:.4;}
 
   .resetcard{border-color:rgba(255,210,63,.25);background:linear-gradient(160deg, rgba(255,210,63,.06), transparent 55%), rgba(14,15,24,.65);}
@@ -511,6 +515,7 @@ document.documentElement.setAttribute('data-theme', state.theme);
 document.addEventListener('DOMContentLoaded', ()=>{ const tb=document.getElementById('themeToggle'); if(tb) tb.textContent = state.theme==='light' ? '☀️' : '🌙'; });
 let priceMap = {}; // address -> latest real price from most recent scan (not persisted)
 let mcapMap = {}; // address -> latest real market cap from most recent scan (not persisted)
+let socialMap = {}; // address -> {twitter, website} from most recent scan (not persisted)
 let confirmMap = {}; // address -> Anzahl aufeinanderfolgender Scans über der Score-Schwelle (nicht persistiert)
 function save(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
 function load(){ try{ const r=localStorage.getItem(STORAGE_KEY); return r?JSON.parse(r):null; }catch(e){ return null; } }
@@ -769,6 +774,21 @@ function closeChart(){
 }
 document.getElementById('chartModal').addEventListener('click', e=>{ if(e.target.id==='chartModal') closeChart(); });
 
+// ---- Externe Links je Coin: Axiom (Chart/Trade), X/Website, RugCheck ----
+function openAxiom(address){
+  if(!address) return;
+  window.open('https://axiom.trade/t/'+address, '_blank');
+}
+function openSocialFor(address, symbol){
+  const soc = socialMap[address] || {};
+  const url = soc.twitter || soc.website || ('https://x.com/search?q=%24'+encodeURIComponent(symbol||'')+'&src=typed_query&f=live');
+  window.open(url, '_blank');
+}
+function openRugcheck(address){
+  if(!address) return;
+  window.open('https://rugcheck.xyz/tokens/'+address, '_blank');
+}
+
 
 
 // ---- KI Wissens-Assistent (lokal, regelbasiert) ----
@@ -900,6 +920,9 @@ async function fetchRealCoins(){
     const seen = new Set(); const coins=[];
     pairs.forEach(p=>{
       if(seen.has(p.baseToken.address)) return; seen.add(p.baseToken.address);
+      const socials = p.info?.socials || [];
+      const twitter = (socials.find(s=>s.type==='twitter')||{}).url || null;
+      const website = (p.info?.websites && p.info.websites[0] && p.info.websites[0].url) || null;
       coins.push({
         symbol: p.baseToken.symbol || '???', address: p.baseToken.address,
         pairAddress: p.pairAddress || null,
@@ -907,7 +930,7 @@ async function fetchRealCoins(){
         volume24h: p.volume?.h24 || 0, change1h: p.priceChange?.h1 || 0,
         ageHours: p.pairCreatedAt ? (Date.now()-p.pairCreatedAt)/3600000 : 200,
         buySellRatio: p.txns?.h1 ? (p.txns.h1.buys/(Math.max(1,p.txns.h1.sells))) : 1,
-        price: parseFloat(p.priceUsd)||0
+        price: parseFloat(p.priceUsd)||0, twitter, website
       });
     });
     return coins.length ? coins.slice(0,50) : null;
@@ -936,7 +959,7 @@ async function runScan(){
   const badge = document.getElementById('dataModeBadge');
   if(coins){ badge.textContent='LIVE'; badge.className='datamode live'; }
   else { coins = demoBatch(); badge.textContent='DEMO'; badge.className='datamode demo'; }
-  coins.forEach(c=>{ c.score=scoreCoin(c); c.time=new Date().toLocaleTimeString(); if(c.price) priceMap[c.address]=c.price; if(c.mcap) mcapMap[c.address]=c.mcap; pushPriceHistory(c.address, c.price||c.score); });
+  coins.forEach(c=>{ c.score=scoreCoin(c); c.time=new Date().toLocaleTimeString(); if(c.price) priceMap[c.address]=c.price; if(c.mcap) mcapMap[c.address]=c.mcap; if(c.twitter||c.website) socialMap[c.address]={twitter:c.twitter, website:c.website}; pushPriceHistory(c.address, c.price||c.score); });
   state.totalScanned += coins.length;
   coins.sort((a,b)=>b.score-a.score);
 
@@ -983,7 +1006,7 @@ function openPosition(c, manual){
   if(state.balance < size){ logMsg(`Zu wenig Balance für ${c.symbol}`); return; }
   state.balance -= size;
   state.positions.push({symbol:c.symbol, address:c.address, pairAddress:c.pairAddress, entryPrice:c.price||0, entryMcap:c.mcap||mcapMap[c.address]||0, size, origSize:size, score:c.score, pnlPct:0, peakPct:0, partialTaken:false, openedAt:Date.now(), manual: !!manual});
-  logMsg(`${manual?'Manuell gekauft':'Gekauft'}: ${c.symbol} für ${size} SOL (Score ${c.score})`);
+  logMsg(`${manual?'Manuell gekauft':'Gekauft'}: ${c.symbol} für ${size} SOL bei MC ${formatK(c.mcap||mcapMap[c.address]||0)} (Score ${c.score})`);
   playBuySound();
   recordEquity();
 }
@@ -1000,7 +1023,7 @@ function closePosition(p, reasonOverride){
   state.history.unshift({symbol:p.symbol, size:p.size, pnl, pnlPct:effPnlPct.toFixed(1),
     entryPrice:p.entryPrice||0, exitPrice, entryMcap:p.entryMcap||0, exitMcap, score:p.score,
     reason, closedAt:new Date().toLocaleTimeString(), day:new Date().toDateString()});
-  logMsg(`Verkauft: ${p.symbol} (${pnl>=0?'+':''}${pnl} SOL, ${reason})`);
+  logMsg(`Verkauft: ${p.symbol} (${pnl>=0?'+':''}${pnl} SOL, ${reason}) · MC ${formatK(p.entryMcap)} → ${formatK(exitMcap)}`);
   celebrateTrade(p.symbol, pnl, effPnlPct.toFixed(1));
   recordEquity();
   trackScoreBand(p.score, pnl);
@@ -1055,7 +1078,7 @@ function tickPositions(){
       state.history.unshift({symbol:p.symbol, size:sellSize, pnl, pnlPct:effPct.toFixed(1),
         entryPrice:p.entryPrice||0, exitPrice: priceMap[p.address]||p.entryPrice, entryMcap:p.entryMcap||0, exitMcap: mcapMap[p.address]||p.entryMcap||0,
         score:p.score, reason:'Teilverkauf', closedAt:new Date().toLocaleTimeString(), day:new Date().toDateString()});
-      logMsg(`Teilverkauf: ${p.symbol} — Hälfte bei +${p.pnlPct.toFixed(1)}% gesichert (${pnl>=0?'+':''}${pnl} SOL), Rest läuft weiter`);
+      logMsg(`Teilverkauf: ${p.symbol} — Hälfte bei +${p.pnlPct.toFixed(1)}% gesichert (${pnl>=0?'+':''}${pnl} SOL), MC ${formatK(p.entryMcap)} → ${formatK(mcapMap[p.address]||p.entryMcap)}, Rest läuft weiter`);
       recordEquity();
     }
 
@@ -1260,7 +1283,9 @@ function render(){
         <div class="${(p.pnlPct||0)>=0?'pos':'neg'}">${(p.pnlPct||0)>=0?'+':''}${(p.pnlPct||0).toFixed(1)}%</div>
       </div>
       <div class="actrow">
-        <button class="actbtn chart" onclick="openChart(${p.pairAddress?`'${p.pairAddress}'`:null}, '${p.symbol}')">📈 Chart</button>
+        <button class="actbtn chart" onclick="openAxiom('${p.address}')">📈 Chart</button>
+        <button class="actbtn social" onclick="openSocialFor('${p.address}','${p.symbol}')">🐦 X</button>
+        <button class="actbtn rug" onclick="openRugcheck('${p.address}')">🛡️ Rug</button>
       </div>
     </div>`;
   }).join('') : '<div class="empty">Keine offenen Positionen</div>';
@@ -1300,7 +1325,9 @@ function render(){
         <div class="sub2">${s.action}</div>
         <div class="wallet"><span>${s.address}</span><button class="copybtn" onclick="copyText('${s.address}')">kopieren</button></div>
         <div class="actrow">
-          <button class="actbtn chart" onclick="openChart(${s.pairAddress?`'${s.pairAddress}'`:null}, '${s.symbol}')">📈 Chart</button>
+          <button class="actbtn chart" onclick="openAxiom('${s.address}')">📈 Chart</button>
+          <button class="actbtn social" onclick="openSocialFor('${s.address}','${s.symbol}')">🐦 X</button>
+          <button class="actbtn rug" onclick="openRugcheck('${s.address}')">🛡️ Rug</button>
         </div>
       </div>`;
     }).join('') : '<div class="empty">Kein Coin über Score '+state.scoreFilter+' — Filter niedriger stellen oder auf nächsten Scan warten.</div>';
